@@ -37,6 +37,10 @@ class BatchVimeoUploader:
         self.video_input = self.script_dir.parent / 'Video_input'
         self.video_input.mkdir(parents=True, exist_ok=True)
         
+        # Edited folder (external to project)
+        self.edited_folder = Path("/Volumes/T7/edited")
+        self.edited_folder.mkdir(exist_ok=True)
+        
         # State manager
         self.state = PipelineState(self.script_dir / 'pipeline_state.json')
         
@@ -198,20 +202,21 @@ class BatchVimeoUploader:
                 self.log(f"      - {name}")
         self.log(f"{'='*60}")
         
-        # Move processed videos to done
-        self._move_to_done(videos)
+        # Move processed videos to edited folder on T7
+        self._move_to_edited(videos)
     
-    def _move_to_done(self, videos: List[Path]):
-        """Move processed videos to done folder"""
-        done_folder = self.video_input / 'done'
-        done_folder.mkdir(exist_ok=True)
+    def _move_to_edited(self, videos: List[Path]):
+        """Move processed videos to edited folder on T7 root"""
+        edited_folder = Path("/Volumes/T7/edited")
+        edited_folder.mkdir(exist_ok=True)
         
         for video_path in videos:
             try:
-                dest = done_folder / video_path.name
+                dest = edited_folder / video_path.name
                 video_path.rename(dest)
+                self.log(f"   Moved {video_path.name} to /Volumes/T7/edited/")
             except Exception as e:
-                self.log(f"⚠️  Could not move {video_path.name}: {e}")
+                self.log(f"   ⚠️  Could not move {video_path.name}: {e}")
 
 def main():
     """Main entry point"""
