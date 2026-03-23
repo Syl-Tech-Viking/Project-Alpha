@@ -1,0 +1,26 @@
+#!/bin/bash
+# Project Alpha v3.4 - Minimal Vimeo-Only Pipeline Runner
+# Watches 4 videos → Uploads to Vimeo → Sends batch Slack notification
+
+cd "$(dirname "$0")/code"
+
+echo "⚡ Project Alpha v3.4 - Minimal Vimeo-Only Pipeline"
+echo "=================================================="
+echo ""
+
+# Check Python
+if ! command -v python3 &> /dev/null; then
+    echo "❌ Python 3 not found"
+    exit 1
+fi
+
+# Check/install dependencies
+echo "📦 Checking dependencies..."
+pip3 install -q -r requirements.txt 2>/dev/null || pip install -q -r requirements.txt 2>/dev/null
+
+# Run pipeline
+echo ""
+echo "🚀 Starting pipeline..."
+echo ""
+
+python3 orchestrator_minimal.py "$@"

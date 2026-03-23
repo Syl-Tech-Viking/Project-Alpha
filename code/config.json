@@ -1,32 +1,7 @@
 {
   "vimeo_token": "YOUR_VIMEO_TOKEN_HERE",
-  "slack_webhook": "YOUR_SLACK_WEBHOOK_URL_HERE",
-  
-  "google_drive": {
-    "enabled": true,
-    "folder_id": "YOUR_GOOGLE_DRIVE_FOLDER_ID",
-    "credentials_file": "client_secrets.json",
-    "token_file": "drive_token.json"
-  },
-  
-  "folders": {
-    "video_input": "../Video_input",
-    "edited": "../../edited",
-    "transcripts": "../../Transcripts"
-  },
-  
-  "processing": {
-    "whisper_model": "base",
-    "speaker_diarization": false
-  },
-  
+  "slack_webhook": "YOUR_SLACK_WEBHOOK_HERE",
   "upload": {
     "privacy": "unlisted"
-  },
-  
-  "daemon": {
-    "batch_timeout_minutes": 10,
-    "session_timeout_minutes": 120,
-    "auto_terminate": true
   }
 }
