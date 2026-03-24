@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Project Alpha v3.4 - Smart Batch Vimeo Uploader with Idle Timeout
-Processes videos → Checks for new videos → Waits 5min idle → Exits
+Project Alpha v3.4 - Unified Batch Vimeo Uploader
+Accumulates all videos (initial + late renders) → Sends ONE batch notification after 5min idle
 
 NO transcription, NO Google Drive upload
 """
@@ -19,16 +19,18 @@ from state_manager import PipelineState
 
 class BatchVimeoUploader:
     """
-    Smart batch uploader with idle timeout
+    Unified batch uploader - ONE notification for all videos
     
     Flow:
     1. Scan folder for all videos
-    2. Wait for FCP rendering to complete on each
-    3. Upload all to Vimeo with v3.3 embed formatting
-    4. Move to edited folder
-    5. Wait 1 minute, check for new videos
-    6. If new videos found, process them (goto step 1)
-    7. If no new videos for 5 minutes, exit
+    2. Process each video (wait FCP → upload → accumulate results)
+    3. Wait 1 minute
+    4. Check for NEW videos
+    5. If found: add to SAME batch, reset 5min timer, goto step 2
+    6. If no new videos for 5 minutes: 
+       - Send ONE batch notification with ALL videos
+       - Move ALL videos to edited folder
+       - Exit
     """
     
     def __init__(self, config_path: str = "config.json"):
@@ -46,8 +48,12 @@ class BatchVimeoUploader:
         # State manager
         self.state = PipelineState(self.script_dir / 'pipeline_state.json')
         
-        # Track processed videos to avoid reprocessing
+        # Track which videos have been processed (by name)
         self.processed_names: Set[str] = set()
+        
+        # Accumulate ALL results here (initial + late additions)
+        self.all_results: List[Dict] = []
+        self.all_processed_paths: List[Path] = []
         
         # Import components
         sys.path.insert(0, str(self.script_dir))
@@ -96,10 +102,10 @@ class BatchVimeoUploader:
         new_videos = [v for v in all_videos if v.name not in self.processed_names]
         return new_videos
     
-    def process_video(self, video_path: Path, index: int, total: int) -> Optional[Dict]:
+    def process_video(self, video_path: Path) -> Optional[Dict]:
         """Process single video: wait for complete → upload to Vimeo"""
         self.log(f"\n{'='*60}")
-        self.log(f"[{index}/{total}] PROCESSING: {video_path.name}")
+        self.log(f"📹 PROCESSING: {video_path.name}")
         self.log(f"{'='*60}")
         
         # Mark as processed immediately
@@ -107,7 +113,7 @@ class BatchVimeoUploader:
         
         # Check if already uploaded (from state)
         if self.state.is_video_uploaded(video_path):
-            self.log(f"✓ Already uploaded to Vimeo")
+            self.log(f"✓ Already uploaded to Vimeo (cached)")
             file_id = self.state.get_file_id(video_path)
             record = self.state.data['processed'].get(file_id, {})
             return {
@@ -164,59 +170,55 @@ class BatchVimeoUploader:
             self.state.mark_failed(video_path, error_msg)
             return None
     
-    def process_batch(self, videos: List[Path]) -> List[Dict]:
-        """Process a batch of videos, return results"""
-        processed_results = []
-        failed_videos = []
-        
+    def process_videos(self, videos: List[Path]):
+        """Process videos and accumulate results (no notification yet)"""
         for i, video_path in enumerate(videos, 1):
-            result = self.process_video(video_path, i, len(videos))
+            self.log(f"\n🎬 Video {i} of {len(videos)} in current batch")
+            result = self.process_video(video_path)
             if result:
-                processed_results.append(result)
-            else:
-                failed_videos.append(video_path.name)
+                self.all_results.append(result)
+                self.all_processed_paths.append(video_path)
             
             # Brief pause between uploads
             if i < len(videos):
                 time.sleep(2)
-        
-        # Send batch notification with ALL results
-        if processed_results:
-            self.log(f"\n{'='*60}")
-            self.log(f"📤 SENDING BATCH NOTIFICATION")
-            self.log(f"   {len(processed_results)} video(s) successful")
-            self.log(f"{'='*60}")
-            self.notifier.send_batch(processed_results)
-        
-        # Summary
-        self.log(f"\n{'='*60}")
-        self.log(f"✓ BATCH COMPLETE")
-        self.log(f"   Successful: {len(processed_results)}/{len(videos)}")
-        if failed_videos:
-            self.log(f"   Failed: {len(failed_videos)}")
-            for name in failed_videos:
-                self.log(f"      - {name}")
-        self.log(f"{'='*60}")
-        
-        # Move processed videos to edited folder on T7
-        self._move_to_edited(videos)
-        
-        return processed_results
     
-    def _move_to_edited(self, videos: List[Path]):
-        """Move processed videos to edited folder on T7 root"""
-        for video_path in videos:
+    def finalize_batch(self):
+        """Send ONE notification and move ALL videos after idle timeout"""
+        if self.all_results:
+            self.log(f"\n{'='*60}")
+            self.log(f"📤 SENDING FINAL BATCH NOTIFICATION")
+            self.log(f"   Total videos: {len(self.all_results)}")
+            self.log(f"{'='*60}")
+            self.notifier.send_batch(self.all_results)
+            
+            # Summary
+            self.log(f"\n{'='*60}")
+            self.log(f"✅ COMPLETE BATCH SUMMARY")
+            self.log(f"   Total successful: {len(self.all_results)}")
+            self.log(f"   Total processed: {len(self.all_processed_paths)}")
+            self.log(f"{'='*60}")
+            
+            # Move ALL processed videos to edited folder
+            self._move_all_to_edited()
+        else:
+            self.log("\n⚠️  No videos were successfully processed")
+    
+    def _move_all_to_edited(self):
+        """Move ALL processed videos to edited folder"""
+        self.log(f"\n📁 Moving {len(self.all_processed_paths)} videos to edited folder...")
+        for video_path in self.all_processed_paths:
             try:
                 dest = self.edited_folder / video_path.name
                 video_path.rename(dest)
-                self.log(f"   Moved {video_path.name} to /Volumes/T7/edited/")
+                self.log(f"   ✓ Moved {video_path.name}")
             except Exception as e:
                 self.log(f"   ⚠️  Could not move {video_path.name}: {e}")
     
     def run(self):
-        """Main loop with idle timeout"""
+        """Main loop - accumulate all videos, one notification at end"""
         print("="*60)
-        print("Project Alpha v3.4 - Smart Batch Vimeo Uploader")
+        print("Project Alpha v3.4 - Unified Batch Vimeo Uploader")
         print("="*60)
         print()
         
@@ -224,9 +226,10 @@ class BatchVimeoUploader:
         check_interval_seconds = 60  # 1 minute
         last_video_time = time.time()
         
-        self.log(f"🔍 Starting smart uploader...")
+        self.log(f"🔍 Starting unified batch uploader...")
+        self.log(f"   Will accumulate ALL videos (initial + late renders)")
         self.log(f"   Will check for new videos every {check_interval_seconds}s")
-        self.log(f"   Will exit after {idle_timeout_seconds}s of no new videos")
+        self.log(f"   Will send ONE notification after {idle_timeout_seconds}s idle")
         self.log("")
         
         while True:
@@ -237,10 +240,10 @@ class BatchVimeoUploader:
                 # Reset idle timer
                 last_video_time = time.time()
                 
-                self.log(f"📁 Found {len(new_videos)} new video(s) to process")
-                self.process_batch(new_videos)
+                self.log(f"📁 Found {len(new_videos)} video(s) - adding to batch")
+                self.process_videos(new_videos)
                 
-                # Wait 1 minute after batch complete, then check again
+                # Wait 1 minute, then check again
                 self.log(f"\n⏳ Waiting {check_interval_seconds}s before checking for more videos...")
                 time.sleep(check_interval_seconds)
                 
@@ -250,10 +253,12 @@ class BatchVimeoUploader:
                 remaining = idle_timeout_seconds - idle_time
                 
                 if idle_time >= idle_timeout_seconds:
-                    self.log(f"\n✅ No new videos for {idle_timeout_seconds}s. Exiting.")
+                    # 5 minutes idle - finalize and exit
+                    self.log(f"\n✅ No new videos for {idle_timeout_seconds}s - finalizing batch...")
+                    self.finalize_batch()
                     break
                 
-                self.log(f"⏳ No new videos. Idle for {int(idle_time)}s. Will exit in {int(remaining)}s...")
+                self.log(f"⏳ No new videos. Idle for {int(idle_time)}s. Will finalize in {int(remaining)}s...")
                 time.sleep(check_interval_seconds)
 
 def main():
