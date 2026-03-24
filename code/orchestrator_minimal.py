@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Project Alpha v3.4 - One-Shot Batch Vimeo Uploader
-Scans folder → Processes ALL videos → Sends batch Slack notification → Exits
+Project Alpha v3.4 - Smart Batch Vimeo Uploader with Idle Timeout
+Processes videos → Checks for new videos → Waits 5min idle → Exits
 
-NO transcription, NO Google Drive upload, NO continuous watching
+NO transcription, NO Google Drive upload
 """
 
 import os
@@ -12,21 +12,23 @@ import json
 import time
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 sys.path.insert(0, str(Path(__file__).parent))
 from state_manager import PipelineState
 
 class BatchVimeoUploader:
     """
-    One-shot batch uploader for Vimeo
+    Smart batch uploader with idle timeout
     
     Flow:
     1. Scan folder for all videos
     2. Wait for FCP rendering to complete on each
     3. Upload all to Vimeo with v3.3 embed formatting
-    4. Send ONE batch Slack notification with ALL embed codes
-    5. Exit
+    4. Move to edited folder
+    5. Wait 1 minute, check for new videos
+    6. If new videos found, process them (goto step 1)
+    7. If no new videos for 5 minutes, exit
     """
     
     def __init__(self, config_path: str = "config.json"):
@@ -43,6 +45,9 @@ class BatchVimeoUploader:
         
         # State manager
         self.state = PipelineState(self.script_dir / 'pipeline_state.json')
+        
+        # Track processed videos to avoid reprocessing
+        self.processed_names: Set[str] = set()
         
         # Import components
         sys.path.insert(0, str(self.script_dir))
@@ -85,13 +90,22 @@ class BatchVimeoUploader:
             self.notifier.send_progress(message)
             self.log(f"📤 Slack: {video_name} - {percent}% uploaded")
     
+    def get_new_videos(self) -> List[Path]:
+        """Get videos that haven't been processed yet"""
+        all_videos = self.watcher.scan_for_videos()
+        new_videos = [v for v in all_videos if v.name not in self.processed_names]
+        return new_videos
+    
     def process_video(self, video_path: Path, index: int, total: int) -> Optional[Dict]:
         """Process single video: wait for complete → upload to Vimeo"""
         self.log(f"\n{'='*60}")
         self.log(f"[{index}/{total}] PROCESSING: {video_path.name}")
         self.log(f"{'='*60}")
         
-        # Check if already uploaded
+        # Mark as processed immediately
+        self.processed_names.add(video_path.name)
+        
+        # Check if already uploaded (from state)
         if self.state.is_video_uploaded(video_path):
             self.log(f"✓ Already uploaded to Vimeo")
             file_id = self.state.get_file_id(video_path)
@@ -150,26 +164,8 @@ class BatchVimeoUploader:
             self.state.mark_failed(video_path, error_msg)
             return None
     
-    def run(self):
-        """Run one-shot batch processing"""
-        print("="*60)
-        print("Project Alpha v3.4 - Batch Vimeo Uploader")
-        print("="*60)
-        print()
-        
-        self.log(f"🔍 Scanning for videos in: {self.video_input}")
-        
-        # Get ALL videos in folder
-        videos = self.watcher.scan_for_videos()
-        
-        if len(videos) == 0:
-            self.log("⚠️  No videos found in input folder")
-            self.log("   Exiting...")
-            return
-        
-        self.log(f"📁 Found {len(videos)} video(s) to process")
-        
-        # Process ALL videos in order
+    def process_batch(self, videos: List[Path]) -> List[Dict]:
+        """Process a batch of videos, return results"""
         processed_results = []
         failed_videos = []
         
@@ -204,19 +200,61 @@ class BatchVimeoUploader:
         
         # Move processed videos to edited folder on T7
         self._move_to_edited(videos)
+        
+        return processed_results
     
     def _move_to_edited(self, videos: List[Path]):
         """Move processed videos to edited folder on T7 root"""
-        edited_folder = Path("/Volumes/T7/edited")
-        edited_folder.mkdir(exist_ok=True)
-        
         for video_path in videos:
             try:
-                dest = edited_folder / video_path.name
+                dest = self.edited_folder / video_path.name
                 video_path.rename(dest)
                 self.log(f"   Moved {video_path.name} to /Volumes/T7/edited/")
             except Exception as e:
                 self.log(f"   ⚠️  Could not move {video_path.name}: {e}")
+    
+    def run(self):
+        """Main loop with idle timeout"""
+        print("="*60)
+        print("Project Alpha v3.4 - Smart Batch Vimeo Uploader")
+        print("="*60)
+        print()
+        
+        idle_timeout_seconds = 300  # 5 minutes
+        check_interval_seconds = 60  # 1 minute
+        last_video_time = time.time()
+        
+        self.log(f"🔍 Starting smart uploader...")
+        self.log(f"   Will check for new videos every {check_interval_seconds}s")
+        self.log(f"   Will exit after {idle_timeout_seconds}s of no new videos")
+        self.log("")
+        
+        while True:
+            # Check for new videos
+            new_videos = self.get_new_videos()
+            
+            if new_videos:
+                # Reset idle timer
+                last_video_time = time.time()
+                
+                self.log(f"📁 Found {len(new_videos)} new video(s) to process")
+                self.process_batch(new_videos)
+                
+                # Wait 1 minute after batch complete, then check again
+                self.log(f"\n⏳ Waiting {check_interval_seconds}s before checking for more videos...")
+                time.sleep(check_interval_seconds)
+                
+            else:
+                # No new videos - check if we've been idle too long
+                idle_time = time.time() - last_video_time
+                remaining = idle_timeout_seconds - idle_time
+                
+                if idle_time >= idle_timeout_seconds:
+                    self.log(f"\n✅ No new videos for {idle_timeout_seconds}s. Exiting.")
+                    break
+                
+                self.log(f"⏳ No new videos. Idle for {int(idle_time)}s. Will exit in {int(remaining)}s...")
+                time.sleep(check_interval_seconds)
 
 def main():
     """Main entry point"""
